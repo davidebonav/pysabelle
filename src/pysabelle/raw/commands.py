@@ -83,46 +83,56 @@ class RawCommands:
         self,
         args: SessionBuildArgs,
         on_note: NoteCallback | None = None,
+        timeout: float | None = None,
     ) -> SessionBuildResults:
         """Send the `session_build` command to build a session hierarchy.
 
         Args:
             args: Build arguments (session name, options, …).
             on_note: Optional callback invoked for each NOTE message during the build.
+            timeout: Optional limit in seconds (raises ``IsabelleTimeoutError``).
 
         Returns:
             Aggregated build results for all required sessions.
         """
-        final = await self._d.run_async("session_build", args.to_dict(), on_note=on_note)
+        final = await self._d.run_async(
+            "session_build", args.to_dict(), on_note=on_note, timeout=timeout
+        )
         return SessionBuildResults.from_dict(final.json() or {})
 
     async def session_start(
         self,
         args: SessionBuildArgs,
         on_note: NoteCallback | None = None,
+        timeout: float | None = None,
     ) -> SessionStartResult:
         """Send the `session_start` command to start a new PIDE session.
 
         Args:
             args: Start arguments (session name, options, print mode, …).
             on_note: Optional callback invoked for each NOTE message during startup.
+            timeout: Optional limit in seconds (raises ``IsabelleTimeoutError``).
 
         Returns:
             Result containing the new session ID and temporary directory.
         """
-        final = await self._d.run_async("session_start", args.to_dict(), on_note=on_note)
+        final = await self._d.run_async(
+            "session_start", args.to_dict(), on_note=on_note, timeout=timeout
+        )
         return SessionStartResult.from_dict(final.json() or {})
 
     async def session_stop(
         self,
         session_id: SessionId,
         on_note: NoteCallback | None = None,
+        timeout: float | None = None,
     ) -> SessionStopResult:
         """Send the `session_stop` command to terminate a running session.
 
         Args:
             session_id: Identifier of the session to stop.
             on_note: Optional callback for NOTE messages during shutdown.
+            timeout: Optional limit in seconds (raises ``IsabelleTimeoutError``).
 
         Returns:
             Stop result indicating success and return code.
@@ -131,6 +141,7 @@ class RawCommands:
             "session_stop",
             {"session_id": session_id.session_id},
             on_note=on_note,
+            timeout=timeout,
         )
         return SessionStopResult.from_dict(final.json() or {})
 
@@ -138,17 +149,21 @@ class RawCommands:
         self,
         args: UseTheoriesArgs,
         on_note: NoteCallback | None = None,
+        timeout: float | None = None,
     ) -> UseTheoriesResults:
         """Send the `use_theories` command to load and check theories.
 
         Args:
             args: Use-theories arguments (session ID, theory list, options, …).
             on_note: Optional callback for NOTE messages (progress, nodes status).
+            timeout: Optional limit in seconds (raises ``IsabelleTimeoutError``).
 
         Returns:
             Results containing per-node status, messages and exports.
         """
-        final = await self._d.run_async("use_theories", args.to_dict(), on_note=on_note)
+        final = await self._d.run_async(
+            "use_theories", args.to_dict(), on_note=on_note, timeout=timeout
+        )
         return UseTheoriesResults.from_dict(final.json() or {})
 
     async def purge_theories(

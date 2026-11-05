@@ -8,7 +8,7 @@ pYsabelle provides a clean, layered API to interact with Isabelle's TCP server (
 
 ## Documentation
 
-The complete project documentation is available on [GitHub Pages](https://davidebonav.github.io/pYsabelle/).
+The complete project documentation is available on [GitHub Pages](https://davidebonav.github.io/pysabelle/).
 
 ---
 
@@ -21,7 +21,8 @@ The complete project documentation is available on [GitHub Pages](https://davide
 - **Server lifecycle management** — can spawn, attach to, or stop an `isabelle server` subprocess automatically
 - **Structured error hierarchy** — `IsabelleConnectionError`, `IsabelleProtocolError`, `IsabelleCommandError`, `IsabelleTimeoutError`, `IsabelleTaskCancelled`
 - **Async progress callbacks** — typed `on_progress` and `on_nodes_status` hooks for long-running tasks
-- **Python 3.9-3.12** support
+- **Timeouts and cancellation** — `timeout=` on long-running commands; on expiry (or when the awaiting asyncio task is cancelled) the server task is cancelled too
+- **Python ≥ 3.10**, no runtime dependencies
 
 ---
 
@@ -60,27 +61,29 @@ pysabelle/
 
 ## Installation
 
+From [PyPI](https://pypi.org/project/pysabelle/):
+
 ```bash
-# still not availabel
-# pip install pYsabelle
+pip install pysabelle
 ```
 
 Or from source:
 
 ```bash
-git clone https://github.com/davidebonav/pYsabelle.git
-cd pYsabelle
+git clone https://github.com/davidebonav/pysabelle.git
+cd pysabelle
 pip install -e .
 ```
 
-**Requirements:** Python ≥ 3.9, a working `isabelle` binary on `$PATH`.
+**Requirements:** Python ≥ 3.10, a working `isabelle` binary on `$PATH`.
+Tested with Isabelle2025-2; the protocol follows the Isabelle2026 System Manual.
 
-<!-- Optional dev/test dependencies:
+Optional dev dependencies:
 
 ```bash
-pip install -e ".[test]"   # pytest + pytest-asyncio
-pip install -e ".[docs]"   # mkdocs-material + mkdocstrings
-``` -->
+pip install -e ".[test]"   # pytest, pytest-asyncio, pytest-timeout, ruff
+pip install -e ".[docs]"   # Sphinx + Read the Docs theme
+```
 
 ---
 
@@ -154,8 +157,12 @@ async with await IsabelleSession.start("HOL") as session:
 
 ```python
 async with await IsabelleSession.start("HOL") as session:
-    # Load and immediately purge (low memory footprint)
+    # Load and immediately purge the theories and their imports (low memory footprint).
+    # Caveat (Isabelle2025-2): a purged theory cannot be loaded again in the same session.
     results = await session.load_and_purge(["~~/src/HOL/Examples/Seq"])
+
+    # Give up after 120 s: the server task is cancelled, IsabelleTimeoutError is raised
+    results = await session.use_theories(["~~/src/HOL/Examples/Seq"], timeout=120)
 
     # Return only errors (empty list = no errors)
     errors = await session.check_theories(["~~/src/HOL/Examples/Seq"])
@@ -246,6 +253,7 @@ client = await IsabelleClient.start(name="isabelle", reuse_existing=True)
 
 ```python
 from pysabelle.raw.exceptions import (
+    IsabelleError,             # common root of every pYsabelle exception
     IsabelleConnectionError,   # TCP-level failure
     IsabelleProtocolError,     # Framing violation (§4.2)
     IsabelleCommandError,      # ERROR reply or FAILED task
@@ -294,7 +302,7 @@ All types mirror §4.3 of the Isabelle System Manual. Key classes:
 | `SessionStopResult` | `ok` + `return_code` from `session_stop` |
 | `UseTheoriesArgs` | Arguments for `use_theories` (includes watchdog, check delays, export pattern) |
 | `UseTheoriesResults` | `ok` + `errors` + per-node `nodes` |
-| `PurgeTheoriesArgs` / `PurgeTheoriesResults` | Arguments and result for `purge_theories` |
+| `PurgeTheoriesArgs` / `PurgeTheoriesResults` | Arguments and result for `purge_theories` (`purged` / `retained` are lists of `Node`) |
 | `TaskId` / `SessionId` | Typed UUID wrappers to prevent accidental swap |
 
 ---
@@ -336,6 +344,20 @@ results = await session.use_theories(
 
 ---
 
+## Development
+
+```bash
+pip install -e ".[test]"
+pytest                 # unit tests (an in-process fake server, no Isabelle needed)
+pytest -m isabelle     # integration tests: need `isabelle` on PATH and the HOL heap
+ruff check src tests
+```
+
+Integration tests start a dedicated server named `pysabelle-pytest` and are
+skipped automatically when no `isabelle` executable is found.
+
+---
+
 ## License
 
-[AGPL-3.0](LICENSE)
+[AGPL-3.0-or-later](LICENSE)

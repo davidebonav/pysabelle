@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import logging
-from typing import Awaitable, Callable
+from collections.abc import Awaitable, Callable
 
 from pysabelle.raw.protocol import RawReply
-from pysabelle.raw.types import Message, NoteCallback, NodeWithStatus, TheoryProgress
+from pysabelle.raw.types import Message, NodeWithStatus, NoteCallback, TheoryProgress
 
 log = logging.getLogger(__name__)
 

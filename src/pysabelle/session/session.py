@@ -3,19 +3,12 @@
 from __future__ import annotations
 
 import logging
-from typing import Sequence
+from collections.abc import Sequence
+from typing import Any
 
 from pysabelle.client.client import IsabelleClient
-from pysabelle.session.callbacks import (
-    NodesStatusCallback,
-    ProgressCallback,
-    build_note_handler,
-    use_theories_note_handler,
-)
-from pysabelle.session.exceptions import SessionAlreadyClosed, TheoryLoadError
 from pysabelle.raw.types import (
     Message,
-    NodeResultEntry,
     PurgeTheoriesArgs,
     PurgeTheoriesResults,
     SessionBuildArgs,
@@ -25,8 +18,26 @@ from pysabelle.raw.types import (
     UseTheoriesArgs,
     UseTheoriesResults,
 )
+from pysabelle.session.callbacks import (
+    NodesStatusCallback,
+    ProgressCallback,
+    build_note_handler,
+    use_theories_note_handler,
+)
+from pysabelle.session.exceptions import SessionAlreadyClosed, TheoryLoadError
 
 log = logging.getLogger(__name__)
+
+
+def _purge_name(name: str) -> str:
+    """Turn a theory reference into a name accepted by ``purge_theories``.
+
+    ``node_name`` values returned by ``use_theories`` end in ``.thy``, but the
+    server resolves purge names like theory imports and rejects that suffix
+    ("Malformed theory import", verified with Isabelle2025-2).  Dropping it
+    yields the same canonical node, independently of ``master_dir``.
+    """
+    return name[:-4] if name.endswith(".thy") else name
 
 
 class IsabelleSession:
@@ -80,6 +91,7 @@ class IsabelleSession:
         *,
         server_name: str = "isabelle",
         reuse_server: bool = True,
+        server_env: dict[str, str] | None = None,
         options: Sequence[str] = (),
         dirs: Sequence[str] = (),
         include_sessions: Sequence[str] = (),
@@ -87,7 +99,7 @@ class IsabelleSession:
         print_mode: Sequence[str] = (),
         on_progress: ProgressCallback | None = None,
         timeout: float | None = None,
-    ) -> "IsabelleSession":
+    ) -> IsabelleSession:
         """Start a new Isabelle server and create a session.
 
         Args:
@@ -95,6 +107,8 @@ class IsabelleSession:
             server_name: Name for the server process.
             reuse_server: If True, attach to an existing server with the same name
                 instead of starting a new one.
+            server_env: Environment for the ``isabelle server`` subprocesses
+                (default: inherit ``os.environ``).
             options: List of Isabelle options (e.g., ["timeout=60"]).
             dirs: Additional directories containing ROOT files.
             include_sessions: Sessions whose theories should be included.
@@ -111,7 +125,7 @@ class IsabelleSession:
             IsabelleCommandError: If the session_start command fails.
         """
         client = await IsabelleClient.start(
-            name=server_name, reuse_existing=reuse_server
+            name=server_name, reuse_existing=reuse_server, server_env=server_env
         )
         return await cls._open_session(
             client,
@@ -140,7 +154,7 @@ class IsabelleSession:
         print_mode: Sequence[str] = (),
         on_progress: ProgressCallback | None = None,
         timeout: float | None = None,
-    ) -> "IsabelleSession":
+    ) -> IsabelleSession:
         """Connect to an already‑running Isabelle server and create a session.
 
         Args:
@@ -191,10 +205,8 @@ class IsabelleSession:
         print_mode: list[str],
         on_progress: ProgressCallback | None,
         timeout: float | None,
-    ) -> "IsabelleSession":
-        """Internal: start the dispatcher and send session_start."""
-        await client._dispatcher.start()
-
+    ) -> IsabelleSession:
+        """Internal: send session_start; release the client if it fails."""
         args = SessionBuildArgs(
             session=session,
             options=options,
@@ -204,7 +216,14 @@ class IsabelleSession:
             print_mode=print_mode,
         )
         on_note = build_note_handler(on_progress) if on_progress else None
-        result = await client.cmd.session_start(args, on_note=on_note)
+        try:
+            result = await client.cmd.session_start(args, on_note=on_note, timeout=timeout)
+        except BaseException:
+            try:
+                await client.aclose()
+            except Exception:  # never mask the original error
+                log.warning("Cleanup after failed session_start failed.", exc_info=True)
+            raise
 
         log.info(
             "Session '%s' started: id=%s tmp_dir=%s",
@@ -250,12 +269,13 @@ class IsabelleSession:
             verbose=verbose,
         )
         on_note = build_note_handler(on_progress) if on_progress else None
-        return await self._client.cmd.session_build(args, on_note=on_note)
+        return await self._client.cmd.session_build(args, on_note=on_note, timeout=timeout)
 
     async def use_theories(
         self,
         theories: list[str],
         *,
+        options: Sequence[str] | None = None,
         master_dir: str | None = None,
         pretty_margin: float | None = None,
         unicode_symbols: bool | None = None,
@@ -273,6 +293,7 @@ class IsabelleSession:
 
         Args:
             theories: List of theory names or file paths.
+            options: Option updates for this invocation (Isabelle2026+).
             master_dir: Base directory for resolving relative paths.
             pretty_margin: Output line width.
             unicode_symbols: Use Unicode symbols in output.
@@ -284,7 +305,9 @@ class IsabelleSession:
             on_progress: Callback for progress messages.
             on_nodes_status: Callback for periodic node status lists.
             raise_on_error: If True, raise TheoryLoadError when `ok` is False.
-            timeout: Optional timeout for the whole command.
+            timeout: Optional timeout in seconds for the whole command; on expiry
+                the task is cancelled on the server and ``IsabelleTimeoutError``
+                is raised.
 
         Returns:
             UseTheoriesResults containing per‑node status, messages and exports.
@@ -298,6 +321,7 @@ class IsabelleSession:
         args = UseTheoriesArgs(
             session_id=self._session_id,
             theories=theories,
+            options=list(options) if options else None,
             master_dir=master_dir,
             pretty_margin=pretty_margin,
             unicode_symbols=unicode_symbols,
@@ -308,7 +332,7 @@ class IsabelleSession:
             nodes_status_delay=nodes_status_delay,
         )
         on_note = use_theories_note_handler(on_progress, on_nodes_status)
-        results = await self._client.cmd.use_theories(args, on_note=on_note)
+        results = await self._client.cmd.use_theories(args, on_note=on_note, timeout=timeout)
 
         if raise_on_error and not results.ok:
             raise TheoryLoadError(results.errors)
@@ -324,9 +348,21 @@ class IsabelleSession:
     ) -> PurgeTheoriesResults:
         """Unload theories from the session.
 
+        Theories are resolved like imports (relative to ``master_dir``).
+        ``node_name`` values from :attr:`UseTheoriesResults.nodes` may be passed
+        as well (§4.4.9): their ``.thy`` suffix is removed automatically.
+        Imported dependencies are *not* added: pass the whole ``nodes`` list
+        returned by ``use_theories`` to release them too.
+
+        .. warning::
+           With Isabelle2025-2 a purged theory cannot be loaded again in the
+           same session (``use_theories`` then reports "Illegal theory
+           header"); this also happens with ``all=True``.  Purge only theories
+           you will not need again, or start a new session.
+
         Args:
-            theories: List of theory node names to purge.
-            master_dir: Base directory for resolving paths.
+            theories: Theory names or node names to purge.
+            master_dir: Base directory for resolving relative names.
             all: If True, purge all currently loaded theories.
 
         Returns:
@@ -339,7 +375,7 @@ class IsabelleSession:
         self._guard()
         args = PurgeTheoriesArgs(
             session_id=self._session_id,
-            theories=list(theories),
+            theories=[_purge_name(t) for t in theories],
             master_dir=master_dir,
             all=all,
         )
@@ -348,7 +384,7 @@ class IsabelleSession:
     async def check_theories(
         self,
         theories: list[str],
-        **kwargs,
+        **kwargs: Any,
     ) -> list[Message]:
         """Load theories and return only the error messages.
 
@@ -368,55 +404,72 @@ class IsabelleSession:
     async def load_and_purge(
         self,
         theories: list[str],
-        **kwargs,
+        **kwargs: Any,
     ) -> UseTheoriesResults:
-        """Load theories and then immediately purge them.
+        """Load theories and then immediately purge them, with all their imports.
 
-        Useful for checking theories with minimal memory footprint.
+        Useful for checking theories with minimal memory footprint.  Every node
+        reported by ``use_theories`` (the requested theories and their imports
+        outside the session image) is purged.  If ``use_theories`` raises (e.g.
+        ``raise_on_error=True``), the requested theories are purged anyway and
+        the original exception is re-raised.
+
+        .. warning::
+           See :meth:`purge_theories`: with Isabelle2025-2 the purged theories
+           (including their imports) cannot be reloaded in the same session.
 
         Args:
             theories: List of theory names.
-            **kwargs: Additional arguments passed to `use_theories`.
+            **kwargs: Additional arguments passed to `use_theories`;
+                ``master_dir`` is also used for purging.
 
         Returns:
             The results of the `use_theories` command (before purging).
         """
-        results = await self.use_theories(theories, **kwargs)
-        node_names = [entry.node.node_name for entry in results.nodes]
-        if node_names:
-            await self.purge_theories(node_names)
+        master_dir = kwargs.get("master_dir")
+        try:
+            results = await self.use_theories(theories, **kwargs)
+        except Exception:
+            try:
+                await self.purge_theories(theories, master_dir=master_dir)
+            except Exception:  # never mask the original error
+                log.warning("Purge after failed use_theories also failed.", exc_info=True)
+            raise
+
+        names = [entry.node.node_name for entry in results.nodes] or list(theories)
+        await self.purge_theories(names, master_dir=master_dir)
         return results
 
-    async def close(self) -> SessionStopResult:
+    async def close(self, *, timeout: float | None = 60.0) -> SessionStopResult:
         """Stop the session and clean up resources.
+
+        The connection, the dispatcher and (if owned) the server process are
+        always released, even when ``session_stop`` fails or times out.
+
+        Args:
+            timeout: Maximum seconds to wait for ``session_stop``.
 
         Returns:
             SessionStopResult indicating success and return code.
 
         Raises:
-            IsabelleCommandError: If session_stop fails.
+            IsabelleCommandError: If session_stop fails (resources are released anyway).
         """
         if self._closed:
             return SessionStopResult(ok=True, return_code=0)
 
         self._closed = True
+        try:
+            result = await self._client.cmd.session_stop(self._session_id, timeout=timeout)
+            log.info(
+                "Session %s stopped: ok=%s rc=%d",
+                self._session_id, result.ok, result.return_code,
+            )
+            return result
+        finally:
+            await self._client.aclose()
 
-        result = await self._client.cmd.session_stop(self._session_id)
-        log.info(
-            "Session %s stopped: ok=%s rc=%d",
-            self._session_id, result.ok, result.return_code,
-        )
-
-        await self._client._dispatcher.stop()
-        await self._client._transport.close()
-
-        if self._client._server is not None:
-            self._client._server.stop()
-            log.debug("Isabelle server process stopped.")
-
-        return result
-
-    async def __aenter__(self) -> "IsabelleSession":
+    async def __aenter__(self) -> IsabelleSession:
         """Enter async context: return self."""
         return self
 

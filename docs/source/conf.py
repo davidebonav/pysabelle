@@ -8,17 +8,16 @@
 
 import os
 import sys
-sys.path.insert(0, os.path.abspath('../..'))
+# The package lives in src/ (src layout); CI also installs it with `pip install -e .`
+sys.path.insert(0, os.path.abspath('../../src'))
 
 project = 'pYsabelle'
-copyright = '2026, davidebo'
-author = 'davidebo'
+copyright = '2026, davidebonav'
+author = 'davidebonav'
 release = '0.1.0'
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
-
-extensions = []
 
 templates_path = ['_templates']
 extensions = [
@@ -33,8 +32,14 @@ autodoc_default_options = {
     'member-order': 'bysource',
     'undoc-members': True,
     'show-inheritance': True,
+    # Packages re-export their submodules' API via __all__: document each
+    # object once, in the module that defines it.
+    'ignore-module-all': True,
 }
 autodoc_typehints = 'description'
+# Render Google-style 'Attributes:' as :ivar: fields, so dataclass fields
+# documented by autodoc are not described twice.
+napoleon_use_ivar = True
 
 
 # -- Options for HTML output -------------------------------------------------

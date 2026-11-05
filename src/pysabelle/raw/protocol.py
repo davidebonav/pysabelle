@@ -158,7 +158,10 @@ def encode_long_message(text: str) -> bytes:
     """Encode a string as a long message according to §4.2.1.
 
     Format: ``<length>\\n<text>\\n`` where `<length>` is the decimal byte count
-    of `<text>` (excluding the trailing newline).
+    of `<text>` *including* the trailing newline, exactly as Isabelle's own
+    ``Byte_Message.write_line_message`` does.  An uncounted trailing newline
+    would be read by the server as a separate empty message (which it answers
+    with a spurious ``NOTE``).
 
     Args:
         text: The message content (may contain newlines).
@@ -169,9 +172,9 @@ def encode_long_message(text: str) -> bytes:
     Raises:
         ValueError: If the text is too long (internal limit not enforced here).
     """
-    payload = text.encode("utf-8")
+    payload = text.encode("utf-8") + b"\n"
     header = f"{len(payload)}\n".encode("ascii")
-    return header + payload + b"\n"
+    return header + payload
 
 
 def encode_short_message(text: str) -> bytes:

@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from typing import Any
 
-from pysabelle.server.server_process import IsabelleServerProcess, is_server_running
-from pysabelle.raw.exceptions import IsabelleConnectionError
 from pysabelle.raw.commands import RawCommands
-from pysabelle.raw.protocol import ReplyKind
-from pysabelle.raw.transport import Transport
 from pysabelle.raw.dispatcher import TaskDispatcher
+from pysabelle.raw.exceptions import IsabelleConnectionError
+from pysabelle.raw.transport import Transport
+from pysabelle.server.server_process import IsabelleServerProcess, is_server_running
 
 log = logging.getLogger(__name__)
 
@@ -59,7 +60,7 @@ class IsabelleClient:
         password: str,
         *,
         _server: IsabelleServerProcess | None = None,
-    ) -> "IsabelleClient":
+    ) -> IsabelleClient:
         """Connect to an already-running Isabelle server.
 
         Performs the password handshake and returns a ready client.
@@ -88,14 +89,16 @@ class IsabelleClient:
         cls,
         name: str = "isabelle",
         reuse_existing: bool = True,
-        server_env:     dict | None = None,
-    ) -> "IsabelleClient":
+        server_env: dict[str, str] | None = None,
+    ) -> IsabelleClient:
         """Start a new Isabelle server (or reuse an existing one) and connect.
 
         Args:
             name: Name of the server instance (as used by `isabelle server`).
             reuse_existing: If True, attach to a running server with the given name
                 instead of starting a new one.
+            server_env: Environment for the ``isabelle server`` subprocesses
+                (default: inherit ``os.environ``).
 
         Returns:
             A connected IsabelleClient instance that owns the server process
@@ -105,8 +108,9 @@ class IsabelleClient:
             IsabelleServerError: If server startup fails.
             IsabelleConnectionError: If the handshake fails.
         """
-        srv = cls._resolve_server(name, reuse_existing, server_env)
-        srv.start()
+        # blocking subprocess calls: keep the event loop responsive
+        srv = await asyncio.to_thread(cls._resolve_server, name, reuse_existing, server_env)
+        await asyncio.to_thread(srv.start)
         log.debug("Isabelle server running: host=%s port=%s", srv.info.host, srv.info.port)
 
         return await cls.connect(
@@ -117,13 +121,15 @@ class IsabelleClient:
         )
 
     @staticmethod
-    def _resolve_server(name: str, reuse_existing: bool, env: dict | None) -> IsabelleServerProcess:
+    def _resolve_server(
+        name: str, reuse_existing: bool, env: dict[str, str] | None
+    ) -> IsabelleServerProcess:
         """Determine which server process to use.
 
         Returns:
             A server process manager ready to be started.
         """
-        if reuse_existing and is_server_running(name=name):
+        if reuse_existing and is_server_running(name=name, env=env):
             return IsabelleServerProcess(name=name, assume_existing=True, env=env)
         return IsabelleServerProcess(name=name, force_start=True, env=env)
 
@@ -147,25 +153,46 @@ class IsabelleClient:
         Does nothing if the client does not own the server (e.g., attached via connect).
         """
         if self._server is not None:
-            self._server.stop()
+            await asyncio.to_thread(self._server.stop)
             log.debug("Isabelle server stopped.")
 
-    def __getattr__(self, name: str):
+    async def aclose(self) -> None:
+        """Release every resource: dispatcher, TCP connection and managed server.
+
+        Each step is attempted even if a previous one fails; the first error
+        (if any) is re-raised at the end.  The server is stopped in a worker
+        thread because ``isabelle server -x`` is a blocking subprocess call.
+        """
+        first_error: BaseException | None = None
+        steps = (
+            self._dispatcher.stop,
+            self._transport.close,
+            self.stop_server,
+        )
+        for step in steps:
+            try:
+                await step()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Error while closing Isabelle client: %s", exc, exc_info=True)
+                first_error = first_error or exc
+        if first_error is not None:
+            raise first_error
+
+    def __getattr__(self, name: str) -> Any:
         """Forward attribute access to `self.cmd` for convenience."""
+        cmd = self.__dict__.get("cmd")  # avoid infinite recursion before __init__ ran
         try:
-            return getattr(self.cmd, name)
+            return getattr(cmd, name)
         except AttributeError:
             raise AttributeError(
                 f"'{type(self).__name__}' and 'RawCommands' have no attribute '{name}'"
-            )
+            ) from None
 
-    async def __aenter__(self) -> "IsabelleClient":
+    async def __aenter__(self) -> IsabelleClient:
         """Enter async context: start the dispatcher."""
         await self._dispatcher.start()
         return self
 
     async def __aexit__(self, *_: object) -> None:
         """Exit async context: stop dispatcher, close transport and server."""
-        await self._dispatcher.stop()
-        await self._transport.close()
-        await self.stop_server()
+        await self.aclose()

@@ -1,6 +1,5 @@
-"""
-pysabelle.raw.transport
-=================
+"""Async TCP transport for the Isabelle server protocol.
+
 Async TCP transport implementing the Isabelle byte-message framing protocol
 (§4.2.1 - §4.2.2).
 

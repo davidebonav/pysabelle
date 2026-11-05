@@ -5,12 +5,12 @@ from __future__ import annotations
 import logging
 import os
 import queue
+import signal
 import subprocess
 import threading
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Optional
 
 from pysabelle.server._patterns import SERVER_READY_RE
 from pysabelle.server.exceptions import (
@@ -24,29 +24,41 @@ from pysabelle.server.models import ServerInfo
 logger = logging.getLogger(__name__)
 
 
-def list_servers(isabelle_bin: str = "isabelle") -> list[ServerInfo]:
-    """List all currently running Isabelle servers.
+def _run_isabelle(
+    isabelle_bin: str, args: list[str], env: dict[str, str] | None, *, check: bool
+) -> subprocess.CompletedProcess[str]:
+    """Run ``isabelle <args>`` synchronously, translating OS errors."""
+    try:
+        return subprocess.run(
+            [isabelle_bin, *args], capture_output=True, text=True, check=check, env=env
+        )
+    except FileNotFoundError as exc:
+        raise IsabelleServerError(
+            f"Isabelle executable {isabelle_bin!r} not found (is it on PATH?)."
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        raise IsabelleServerError(
+            f"'isabelle {' '.join(args)}' failed (rc={exc.returncode}): {exc.stderr.strip()}"
+        ) from exc
+
+
+def list_servers(
+    isabelle_bin: str = "isabelle", env: dict[str, str] | None = None
+) -> list[ServerInfo]:
+    """List all currently running Isabelle servers (``isabelle server -l``).
 
     Args:
         isabelle_bin: Path or name of the `isabelle` executable.
+        env: Environment for the subprocess (default: inherit).  It determines
+            ``$ISABELLE_HOME_USER`` and hence the ``servers.db`` that is consulted.
 
     Returns:
         List of ServerInfo objects for each running server.
 
     Raises:
-        IsabelleServerError: If the `isabelle server -l` command fails.
+        IsabelleServerError: If the executable is missing or the command fails.
     """
-    try:
-        result = subprocess.run(
-            [isabelle_bin, "server", "-l"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-    except subprocess.CalledProcessError as exc:
-        raise IsabelleServerError(
-            f"'isabelle server -l' failed (rc={exc.returncode}): {exc.stderr.strip()}"
-        ) from exc
+    result = _run_isabelle(isabelle_bin, ["server", "-l"], env, check=True)
 
     servers: list[ServerInfo] = []
     for line in result.stdout.splitlines():
@@ -63,17 +75,20 @@ def list_servers(isabelle_bin: str = "isabelle") -> list[ServerInfo]:
     return servers
 
 
-def is_server_running(name: str, isabelle_bin: str = "isabelle") -> bool:
+def is_server_running(
+    name: str, isabelle_bin: str = "isabelle", env: dict[str, str] | None = None
+) -> bool:
     """Check whether a server with the given name is currently running.
 
     Args:
         name: Server name.
         isabelle_bin: Path or name of the `isabelle` executable.
+        env: Environment for the subprocess (see :func:`list_servers`).
 
     Returns:
         True if a server with that name exists.
     """
-    return any(s.name == name for s in list_servers(isabelle_bin))
+    return any(s.name == name for s in list_servers(isabelle_bin, env))
 
 
 class BaseIsabelleServer(ABC):
@@ -119,7 +134,9 @@ class IsabelleServerProcess(BaseIsabelleServer):
             running, stop it first and then start a fresh one.
         isabelle_bin: Path or name of the `isabelle` executable.
         startup_timeout: Maximum seconds to wait for the server to become ready.
-        env: env dictionary
+        env: Environment for every ``isabelle`` subprocess (spawn, ``-l``, ``-x``);
+            ``None`` inherits ``os.environ``.  Use it e.g. to select a different
+            ``ISABELLE_HOME_USER``.
 
     Raises:
         ValueError: If both `assume_existing` and `force_start` are True.
@@ -128,13 +145,13 @@ class IsabelleServerProcess(BaseIsabelleServer):
     def __init__(
         self,
         name: str = "isabelle",
-        port: Optional[int] = None,
-        log_file: Optional[str | Path] = None,
+        port: int | None = None,
+        log_file: str | Path | None = None,
         assume_existing: bool = False,
         force_start: bool = False,
         isabelle_bin: str = "isabelle",
         startup_timeout: float = 30.0,
-        env: dict | None = None,
+        env: dict[str, str] | None = None,
     ) -> None:
         if assume_existing and force_start:
             raise ValueError(
@@ -148,15 +165,16 @@ class IsabelleServerProcess(BaseIsabelleServer):
         self._force_start = force_start
         self._isabelle_bin = isabelle_bin
         self._startup_timeout = startup_timeout
-        self._env = env or os.environ.copy()
+        self._env = os.environ.copy() if env is None else dict(env)
 
-        self._info: Optional[ServerInfo] = None
+        self._info: ServerInfo | None = None
         self._owns_process: bool = False
+        self._proc: subprocess.Popen[str] | None = None
 
     @property
     def is_running(self) -> bool:
         """Check if the server process is still alive (by asking `isabelle server -l`)."""
-        return is_server_running(self._name, self._isabelle_bin)
+        return is_server_running(self._name, self._isabelle_bin, self._env)
 
     @property
     def info(self) -> ServerInfo:
@@ -189,7 +207,7 @@ class IsabelleServerProcess(BaseIsabelleServer):
             ServerStartupTimeout: If the server does not become ready in time.
             IsabelleServerError: For other process‑related errors.
         """
-        running_servers = list_servers(self._isabelle_bin)
+        running_servers = list_servers(self._isabelle_bin, self._env)
         server_exists = any(s.name == self._name for s in running_servers)
 
         if self._assume_existing:
@@ -215,15 +233,15 @@ class IsabelleServerProcess(BaseIsabelleServer):
 
         if not self.is_running:
             logger.debug("Server '%s' is already gone.", self._name)
+            self._reap(timeout=1.0)
             self._reset()
             return
 
         logger.debug("Stopping server '%s'.", self._name)
-        subprocess.run(
-            [self._isabelle_bin, "server", "-x", "-n", self._name],
-            check=False,
-            capture_output=True,
+        _run_isabelle(
+            self._isabelle_bin, ["server", "-x", "-n", self._name], self._env, check=False
         )
+        self._reap()
         self._reset()
 
     def __enter__(self) -> IsabelleServerProcess:
@@ -273,14 +291,21 @@ class IsabelleServerProcess(BaseIsabelleServer):
         cmd = self._build_command()
         logger.debug("Spawning: %s", " ".join(cmd))
 
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            env=self._env,
-        )
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                env=self._env,
+                start_new_session=True,  # own process group: wrapper script + JVM
+            )
+        except FileNotFoundError as exc:
+            raise IsabelleServerError(
+                f"Isabelle executable {self._isabelle_bin!r} not found (is it on PATH?)."
+            ) from exc
+        self._proc = proc
         self._owns_process = True
 
         self._info = self._wait_for_ready(proc)
@@ -290,10 +315,8 @@ class IsabelleServerProcess(BaseIsabelleServer):
     def _stop_external(self, *, wait: bool) -> None:
         """Stop a server that is not owned by this instance (for force_start)."""
         logger.debug("Stopping existing server '%s' before respawn.", self._name)
-        subprocess.run(
-            [self._isabelle_bin, "server", "-x", "-n", self._name],
-            check=False,
-            capture_output=True,
+        _run_isabelle(
+            self._isabelle_bin, ["server", "-x", "-n", self._name], self._env, check=False
         )
         if not wait:
             return
@@ -318,44 +341,75 @@ class IsabelleServerProcess(BaseIsabelleServer):
         return cmd
 
     def _wait_for_ready(self, proc: subprocess.Popen[str]) -> ServerInfo:
-        """Read the server's stdout until the ready line appears, then return info."""
+        """Read the server's stdout until the ready line appears, then return info.
+
+        The reader thread keeps draining the pipe for the whole lifetime of the
+        process (forwarding lines to the debug log): otherwise the server would
+        block as soon as its log output (stderr, merged into stdout) fills the
+        OS pipe buffer.
+        """
         result_q: queue.Queue[ServerInfo | Exception] = queue.Queue()
 
         def _reader() -> None:
+            ready = False
             try:
                 for raw_line in proc.stdout:  # type: ignore[union-attr]
                     line = raw_line.strip()
-                    logger.debug("Server stdout: %s", line)
+                    logger.debug("Server '%s' output: %s", self._name, line)
+                    if ready:
+                        continue
                     match = SERVER_READY_RE.match(line)
                     if match:
+                        ready = True
                         result_q.put(ServerInfo(
                             name=match.group("name"),
                             host=match.group("host"),
                             port=int(match.group("port")),
                             password=match.group("password"),
                         ))
-                        return
-                rc = proc.wait()
-                result_q.put(IsabelleServerError(
-                    f"Server '{self._name}' exited (rc={rc}) before signalling readiness."
-                ))
+                if not ready:
+                    rc = proc.wait()
+                    result_q.put(IsabelleServerError(
+                        f"Server '{self._name}' exited (rc={rc}) before signalling readiness."
+                    ))
             except Exception as exc:  # noqa: BLE001
-                result_q.put(exc)
+                if not ready:
+                    result_q.put(exc)
 
-        threading.Thread(target=_reader, daemon=True).start()
+        threading.Thread(target=_reader, name=f"isabelle-server-{self._name}", daemon=True).start()
 
         try:
             outcome = result_q.get(timeout=self._startup_timeout)
         except queue.Empty:
-            proc.kill()
+            self._kill_group(proc)
             raise ServerStartupTimeout(
                 f"Server '{self._name}' did not become ready "
                 f"within {self._startup_timeout} s."
-            )
+            ) from None
 
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
+
+    @staticmethod
+    def _kill_group(proc: subprocess.Popen[str]) -> None:
+        """Kill the whole process group of ``proc`` (wrapper script and JVM)."""
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            proc.kill()
+        proc.wait()
+
+    def _reap(self, timeout: float = 10.0) -> None:
+        """Wait for an owned server process to exit; kill it if it does not."""
+        proc, self._proc = self._proc, None
+        if proc is None:
+            return
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            logger.warning("Server '%s' did not exit after shutdown; killing it.", self._name)
+            self._kill_group(proc)
 
     def _reset(self) -> None:
         """Clear internal state after stopping."""

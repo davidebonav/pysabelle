@@ -6,12 +6,12 @@ JSON (de)serialisation.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Awaitable, Callable, TYPE_CHECKING
+from typing import Any
 
-if TYPE_CHECKING:
-    from pysabelle.raw.protocol import RawReply
+from pysabelle.raw.protocol import RawReply  # no cycle: protocol does not import types
 
 # ---------------------------------------------------------------------------
 # Primitive aliases
@@ -65,7 +65,7 @@ class SessionId:
 #: Receives the raw :class:`~pysabelle.raw.protocol.RawReply` so the caller can
 #: decode it into :class:`TheoryProgress`, a generic :class:`Message`, or
 #: any other appropriate type.
-NoteCallback = Callable[["RawReply"], Awaitable[None]]
+NoteCallback = Callable[[RawReply], Awaitable[None]]
 
 
 # ---------------------------------------------------------------------------
@@ -486,6 +486,8 @@ class UseTheoriesArgs:
     Attributes:
         session_id: Identifier of the target session.
         theories: Theory names or absolute file paths to load.
+        options: Individual option updates for this invocation, e.g.
+            ``["show_states"]`` (Isabelle2026, §4.4.8; ignored by older servers).
         master_dir: Base directory for resolving relative theory paths;
             defaults to the session ``tmp_dir``.
         pretty_margin: Line width used for pretty‑printing output messages;
@@ -504,6 +506,7 @@ class UseTheoriesArgs:
 
     session_id: SessionId
     theories: list[str]
+    options: list[str] | None = None
     master_dir: str | None = None
     pretty_margin: float | None = None
     unicode_symbols: bool | None = None
@@ -519,6 +522,8 @@ class UseTheoriesArgs:
             "session_id": self.session_id.session_id,
             "theories": self.theories,
         }
+        if self.options:
+            d["options"] = self.options
         if self.master_dir is not None:
             d["master_dir"] = self.master_dir
         if self.pretty_margin is not None:
@@ -671,19 +676,29 @@ class PurgeTheoriesArgs:
 class PurgeTheoriesResults:
     """Result of a ``purge_theories`` command (§4.4.9).
 
+    The manual gives the type as ``{purged: [string]}``, but the server
+    (verified with Isabelle2025-2) returns lists of ``node`` objects for both
+    fields; plain strings are still accepted for robustness.
+
     Attributes:
-        purged: Node names that were actually removed from the session.
-        retained: Node names that could not be purged because they are
-            still referenced by other theories or pending tasks.
+        purged: Theory nodes that were actually removed from the session.
+        retained: Remaining loaded nodes (the complement of ``purged``), e.g.
+            those still imported by other theories or used by pending tasks.
     """
 
-    purged: list[str]
-    retained: list[str]
+    purged: list[Node]
+    retained: list[Node]
+
+    @staticmethod
+    def _node(x: Any) -> Node:
+        if isinstance(x, dict):
+            return Node.from_dict(x)
+        return Node(node_name=str(x), theory_name="")
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> PurgeTheoriesResults:
         """Deserialise from a JSON object."""
         return cls(
-            purged=d.get("purged", []),
-            retained=d.get("retained", []),
+            purged=[cls._node(x) for x in d.get("purged", [])],
+            retained=[cls._node(x) for x in d.get("retained", [])],
         )

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 
 class IsabelleError(Exception):
-    """Root exception for all Isabelle client errors."""
+    """Root exception for all pYsabelle errors (protocol, server process, session)."""
 
 
 class IsabelleConnectionError(IsabelleError):

@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+# Single root of the whole exception hierarchy (re-exported here for compatibility).
+from pysabelle.raw.exceptions import IsabelleError
 
-class IsabelleError(Exception):
-    """Root exception for the entire ``isabelle`` package."""
+__all__ = [
+    "IsabelleError",
+    "IsabelleServerError",
+    "ServerStartupTimeout",
+    "ServerAlreadyRunning",
+    "ServerNotRunning",
+]
 
 
 class IsabelleServerError(IsabelleError):

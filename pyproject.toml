@@ -5,37 +5,42 @@ build-backend = "hatchling.build"
 [project]
 name = "pYsabelle"
 version = "0.1.0"
-dependencies = [ "pydantic>=2.0.0", ]
-requires-python = ">=3.9"
+dependencies = []
+requires-python = ">=3.10"
 authors = [
     {name = "davidebonav"}
 ]
 # maintainers = [ {name = "", email = ""} ]
 description = "A modern Python client for the Isabelle Server protocol"
 readme = "README.md"
-license = {text = "AGPL-3.0"}
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
 keywords = ["isabelle", "hol", "interactive theorem proving", "asyncio", "formal verification"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering",
+    "Framework :: AsyncIO",
 ]
 
 [project.urls]
-# Homepage = ""
-# Documentation = ""
-Repository = "https://github.com/davidebonav/pYsabelle"
-Issues = "https://github.com/davidebonav/pYsabelle/issues"
-# Changelog = "https://github.com/davidebonav/pYsabelle/blob/master/CHANGELOG.md"
+Homepage = "https://github.com/davidebonav/pysabelle"
+Documentation = "https://davidebonav.github.io/pysabelle/"
+Repository = "https://github.com/davidebonav/pysabelle"
+Issues = "https://github.com/davidebonav/pysabelle/issues"
+# Changelog = "https://github.com/davidebonav/pysabelle/blob/main/CHANGELOG.md"
 # "Download Link" = ""
 
 [project.optional-dependencies]
-test = [ "pytest>=7.0", "pytest-asyncio>=0.21.0",  ]
-docs = [ "mkdocs-material", "mkdocstrings[python]", ]
+test = [ "pytest>=8.0", "pytest-asyncio>=0.24", "pytest-timeout>=2.3", "ruff" ]
+docs = [ "sphinx>=7", "sphinx-rtd-theme>=2", "sphinx-autodoc-typehints>=2", ]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/pysabelle", "tests", "examples", "README.md", "LICENSE"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pysabelle"]
@@ -43,11 +48,19 @@ packages = ["src/pysabelle"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+timeout = 60
+markers = [
+    "isabelle: integration test that needs a local `isabelle` executable and the HOL heap",
+]
 
 [tool.ruff]
 line-length    = 100
-target-version = "py311"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "ANN"]
-ignore = ["ANN101", "ANN102", "ANN401"]
+ignore = ["ANN401"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/pysabelle/__init__.py" = ["F403"]   # intentional star re-exports
+"tests/*" = ["ANN"]

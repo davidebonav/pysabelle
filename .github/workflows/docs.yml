@@ -3,6 +3,15 @@ name: Deploy Sphinx documentation to Pages
 on:
   push:
     branches: [main]
+  pull_request:          # build only (no deploy) to catch documentation errors early
+  workflow_dispatch:     # allow manual re-deploys from the Actions tab
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -13,22 +22,21 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install dependencies
-        run: |
-          pip install sphinx sphinx-rtd-theme sphinx-autodoc-typehints 
+      - name: Install package and documentation dependencies
+        # the package must be importable, otherwise autodoc silently produces empty API pages
+        run: pip install -e ".[docs]"
       - name: Generate .rst files with sphinx-apidoc
-        run: |
-          sphinx-apidoc -o docs/source src/pysabelle --force
-      - name: Build HTML documentation
-        run: |
-          cd docs
-          make html
+        run: sphinx-apidoc -o docs/source src/pysabelle --force
+      - name: Build HTML documentation (warnings are errors)
+        run: make -C docs html SPHINXOPTS="-W --keep-going"
       - name: Upload artifact
+        if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v3
         with:
           path: docs/build/html
 
   deploy:
+    if: github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-latest
     permissions:

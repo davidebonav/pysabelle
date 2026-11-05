@@ -11,7 +11,7 @@ The public interface is exposed through the subpackages:
 - `pysabelle.session`: High-level session API with convenience methods.
 """
 
-from pysabelle.server import *
-from pysabelle.raw import *
 from pysabelle.client import *
+from pysabelle.raw import *
+from pysabelle.server import *
 from pysabelle.session import *
